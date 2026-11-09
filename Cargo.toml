@@ -1,0 +1,15 @@
+[package]
+name = "vpngate-gui"
+version = "0.1.0"
+edition = "2021"
+description = "VPN Gate GUI for Ubuntu (Rust + eframe/egui)"
+
+[dependencies]
+eframe = "0.32"
+egui = "0.32"
+reqwest = { version = "0.12", features = ["blocking", "rustls-tls"] }
+base64 = "0.22"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = "0.4"
+anyhow = "1.0"
