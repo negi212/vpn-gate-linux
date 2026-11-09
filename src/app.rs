@@ -332,13 +332,19 @@ impl VpnGuiApp {
             let log_fn = |msg: &str| {
                 let _ = log_tx.send(ConnEvent::Log(msg.to_string()));
             };
-            nmcli::disconnect_blocking(
+            match nmcli::disconnect_blocking(
                 &profile,
                 Some(&ovpn_path),
                 cred_path.as_deref(),
                 &log_fn,
-            );
-            let _ = tx.send(ConnEvent::Log("切断しました。".to_string()));
+            ) {
+                Ok(()) => {
+                    let _ = tx.send(ConnEvent::Log("切断しました。".to_string()));
+                }
+                Err(e) => {
+                    let _ = tx.send(ConnEvent::Log(format!("切断に失敗しました: {e:#}")));
+                }
+            }
         });
         // 切断後は元IP表示に戻すため再取得
         self.refresh_base_ip();
@@ -894,6 +900,26 @@ impl eframe::App for VpnGuiApp {
                     self.selected_host = Some(h);
                 }
             });
+        });
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let ConnStatus::Connected(info) =
+            std::mem::replace(&mut self.status, ConnStatus::Disconnected)
+        {
+            eprintln!("vpngate-gui: 終了時切断 {}", info.profile);
+            let log_fn = |msg: &str| eprintln!("vpngate-gui: {msg}");
+            if let Err(e) = nmcli::disconnect_blocking(
+                &info.profile,
+                Some(&info.ovpn_path),
+                info.cred_path.as_deref(),
+                &log_fn,
+            ) {
+                eprintln!("vpngate-gui: 終了時切断に失敗: {e:#}");
+            }
+        }
+        nmcli::cleanup_stale_profiles("VG-", &|msg: &str| {
+            eprintln!("vpngate-gui: {msg}")
         });
     }
 }

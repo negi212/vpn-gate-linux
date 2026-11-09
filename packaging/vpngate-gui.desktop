@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=VPN Gate GUI
+Comment=One-click VPN Gate client
+Exec=/usr/bin/vpngate-gui
+Icon=vpngate-gui
+StartupWMClass=vpngate-gui
+Terminal=false
+Type=Application
+Categories=Network;

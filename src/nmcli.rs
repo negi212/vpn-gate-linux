@@ -256,20 +256,89 @@ pub fn connect_blocking(
     Ok((profile, ovpn_path, cred_path))
 }
 
+/// 指定プロファイルが現在アクティブかを確認する。
+fn is_profile_active(profile: &str) -> bool {
+    let out = Command::new("nmcli")
+        .args(["-t", "-f", "NAME", "connection", "show", "--active"])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .any(|l| l.trim() == profile),
+        _ => false,
+    }
+}
+
+/// 自アプリ名義 (prefix) の残留プロファイルを掃除する。
+/// 終了時の取りこぼし (接続試行中の確定など) を想定し、
+/// アクティブなものだけ down + delete する。
+pub fn cleanup_stale_profiles(prefix: &str, log_fn: &impl Fn(&str)) {
+    let out = Command::new("nmcli")
+        .args(["-t", "-f", "NAME", "connection", "show", "--active"])
+        .output();
+    let Ok(out) = out else { return };
+    if !out.status.success() {
+        return;
+    }
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let name = line.trim();
+        if name.starts_with(prefix) {
+            log_fn(&format!("残留プロファイルを切断します: {name}"));
+            let _ = run_cmd(
+                "nmcli",
+                &["connection", "down", "id", name],
+                Duration::from_secs(30),
+            );
+            let _ = run_cmd(
+                "nmcli",
+                &["connection", "delete", "id", name],
+                Duration::from_secs(15),
+            );
+        }
+    }
+}
+
 /// 切断の実処理 (ブロッキング)。
+/// down を最大3回試し、アクティブ一覧から消えたことを確認してから
+/// 後片付けをする。消えなければ Err を返し、呼び出し側で明示する。
 pub fn disconnect_blocking(
     profile: &str,
     ovpn_path: Option<&Path>,
     cred_path: Option<&Path>,
     log_fn: &impl Fn(&str),
-) {
-    match run_cmd(
-        "nmcli",
-        &["connection", "down", "id", profile],
-        Duration::from_secs(30),
-    ) {
-        Ok(o) => log_fn(&format!("nmcli down 完了:\n{o}")),
-        Err(e) => log_fn(&format!("nmcli down で警告(続行): {e:#}")),
+) -> Result<()> {
+    let mut down_ok = false;
+    for attempt in 1..=3 {
+        match run_cmd(
+            "nmcli",
+            &["connection", "down", "id", profile],
+            Duration::from_secs(30),
+        ) {
+            Ok(o) => {
+                log_fn(&format!("nmcli down 完了:\n{o}"));
+                down_ok = true;
+                break;
+            }
+            Err(e) => {
+                // 既に非アクティブな場合も成功扱いにする
+                if is_profile_active(profile) {
+                    log_fn(&format!("nmcli down 再試行 {attempt}/3: {e:#}"));
+                    std::thread::sleep(Duration::from_secs(2));
+                } else {
+                    log_fn("プロファイルは既に非アクティブでした。");
+                    down_ok = true;
+                    break;
+                }
+            }
+        }
+    }
+    if !down_ok {
+        anyhow::bail!("切断コマンドが3回失敗しました。手動で `nmcli connection down id {profile}` を実行してください");
+    }
+    // down 直後に残留していないか最終確認する
+    std::thread::sleep(Duration::from_secs(1));
+    if is_profile_active(profile) {
+        anyhow::bail!("{profile} がまだアクティブです。再度 [切断] を押すか、手動で `nmcli connection down id {profile}` を実行してください");
     }
     match run_cmd(
         "nmcli",
@@ -279,13 +348,25 @@ pub fn disconnect_blocking(
         Ok(o) => log_fn(&format!("プロファイル削除:\n{o}")),
         Err(e) => log_fn(&format!("プロファイル削除で警告(続行): {e:#}")),
     }
+    // 直起動 (F-06b) の残骸 openvpn プロセスがあれば止める
+    if let Some(p) = ovpn_path {
+        let path_str = p.to_string_lossy().to_string();
+        match Command::new("pkill").args(["-f", &path_str]).output() {
+            Ok(o) if o.status.success() => log_fn("残留 openvpn プロセスを停止しました。"),
+            _ => {}
+        }
+    }
     if let Some(p) = ovpn_path {
         match std::fs::remove_file(p) {
             Ok(()) => log_fn(&format!("一時ovpnを削除しました: {}", p.display())),
-            Err(e) => log_fn(&format!("一時ovpn削除で警告: {e}")),
+            Err(e) if p.exists() => {
+                anyhow::bail!("一時ovpnの削除に失敗しました ({}): {e}", p.display())
+            }
+            Err(_) => {}
         }
     }
     if let Some(c) = cred_path {
         let _ = std::fs::remove_file(c);
     }
+    Ok(())
 }
